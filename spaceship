@@ -1,0 +1,947 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Space Shooter</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #0a0a0a;
+      overflow: hidden;
+      font-family: Arial, sans-serif;
+    }
+
+    h1 {
+      color: #ffffff;
+      font-size: 1.6rem;
+      margin: 10px 0 6px;
+      letter-spacing: 4px;
+      text-transform: uppercase;
+      text-align: center;
+    }
+
+    canvas {
+      display: block;
+      background-color: #000000;
+    }  </style>
+</head>
+<body>
+  <h1>Space Shooter</h1>
+  <canvas id="gameCanvas"></canvas>
+
+  <!-- Click-to-start overlay (browser requires user gesture for audio) -->
+  <div id="startOverlay" style="
+    position:fixed; inset:0; background:rgba(0,0,0,0.82);
+    display:flex; flex-direction:column;
+    align-items:center; justify-content:center;
+    z-index:99; cursor:pointer;">
+    <div style="font-size:3rem; color:#4fc3f7; letter-spacing:6px;
+                text-transform:uppercase; font-family:Arial,sans-serif;
+                font-weight:bold; margin-bottom:16px;">🚀 SPACE SHOOTER</div>
+    <div style="font-size:1.3rem; color:#ffffff; font-family:Arial,sans-serif;
+                animation: pulse 1.2s ease-in-out infinite;">
+      Click anywhere to start
+    </div>
+    <style>
+      @keyframes pulse {
+        0%,100%{ opacity:1; } 50%{ opacity:0.3; }
+      }
+    </style>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+
+    // =========================================================
+    // RESIZE — keep canvas filling the window
+    // =========================================================
+    function resizeCanvas() {
+      canvas.width  = window.innerWidth;
+      canvas.height = window.innerHeight;
+      generateStars();
+      // Re-anchor player to bottom centre on resize
+      player.y = canvas.height - 60;
+    }
+    window.addEventListener('resize', resizeCanvas);
+
+    // =========================================================
+    // AUDIO  — all sounds synthesised via Web Audio API
+    // =========================================================
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+    function playShoot() {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.connect(gain); gain.connect(audioCtx.destination);
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(880, audioCtx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(220, audioCtx.currentTime + 0.08);
+      gain.gain.setValueAtTime(0.18, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.1);
+      osc.start(); osc.stop(audioCtx.currentTime + 0.1);
+    }
+
+    function playExplosion() {
+      const bufferSize = audioCtx.sampleRate * 0.25;
+      const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) data[i] = (Math.random() * 2 - 1);
+      const source = audioCtx.createBufferSource();
+      source.buffer = buffer;
+      const gain = audioCtx.createGain();
+      const filter = audioCtx.createBiquadFilter();
+      filter.type = 'lowpass'; filter.frequency.value = 800;
+      source.connect(filter); filter.connect(gain); gain.connect(audioCtx.destination);
+      gain.gain.setValueAtTime(0.6, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.25);
+      source.start(); source.stop(audioCtx.currentTime + 0.25);
+    }
+
+    function playPowerUp() {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.connect(gain); gain.connect(audioCtx.destination);
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(440, audioCtx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(1760, audioCtx.currentTime + 0.3);
+      gain.gain.setValueAtTime(0.25, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.35);
+      osc.start(); osc.stop(audioCtx.currentTime + 0.35);
+    }
+
+    function playBossExplosion() {
+      // Deeper, longer boom for the boss
+      const bufferSize = audioCtx.sampleRate * 0.5;
+      const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) data[i] = (Math.random() * 2 - 1);
+      const source = audioCtx.createBufferSource();
+      source.buffer = buffer;
+      const gain   = audioCtx.createGain();
+      const filter = audioCtx.createBiquadFilter();
+      filter.type = 'lowpass'; filter.frequency.value = 400;
+      source.connect(filter); filter.connect(gain); gain.connect(audioCtx.destination);
+      gain.gain.setValueAtTime(1.0, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.5);
+      source.start(); source.stop(audioCtx.currentTime + 0.5);
+    }
+
+    // =========================================================
+    // BGM — Synthwave / Arcade space shooter soundtrack
+    // Layers: punchy lead, walking bass, arpeggiated chords,
+    //         kick, snare, open hi-hat, closed hi-hat
+    // Key: D minor  |  BPM: 145  |  Loops seamlessly
+    // =========================================================
+    let bgmPlaying        = false;
+    let bgmNodes          = [];
+    let bgmScheduleTimer  = null;
+    let bgmBarCount       = 0;
+    let bgmMaster         = null;
+
+    // --- Timing ---
+    const BPM  = 145;
+    const BEAT = 60 / BPM;
+    const BAR  = BEAT * 4;
+
+    // --- D natural minor scale (two octaves, Hz) ---
+    // D2 E2 F2 G2 A2 Bb2 C3 | D3 E3 F3 G3 A3 Bb3 C4 | D4 E4 F4 G4 A4 Bb4 C5 D5
+    const S = [
+       73.42,  82.41,  87.31,  98.00, 110.00, 116.54, 130.81,
+      146.83, 164.81, 174.61, 196.00, 220.00, 233.08, 261.63,
+      293.66, 329.63, 349.23, 392.00, 440.00, 466.16, 523.25, 587.33
+    ];
+
+    // ---- Audio helpers ----
+    function makeCompressor(dest) {
+      const c = audioCtx.createDynamicsCompressor();
+      c.threshold.value = -12; c.knee.value = 8;
+      c.ratio.value = 8;       c.attack.value = 0.002;
+      c.release.value = 0.2;
+      c.connect(dest);
+      bgmNodes.push(c);
+      return c;
+    }
+
+    function makeGainNode(val, dest) {
+      const g = audioCtx.createGain();
+      g.gain.value = val;
+      g.connect(dest);
+      bgmNodes.push(g);
+      return g;
+    }
+
+    function makeLPF(freq, dest) {
+      const f = audioCtx.createBiquadFilter();
+      f.type = 'lowpass'; f.frequency.value = freq; f.Q.value = 0.8;
+      f.connect(dest);
+      bgmNodes.push(f);
+      return f;
+    }
+
+    function makeDelay(time, feedback, dest) {
+      const d  = audioCtx.createDelay(1.0);
+      const fb = audioCtx.createGain();
+      const gw = audioCtx.createGain();
+      d.delayTime.value = time;
+      fb.gain.value     = feedback;
+      gw.gain.value     = 0.22;
+      d.connect(fb); fb.connect(d);
+      d.connect(gw); gw.connect(dest);
+      bgmNodes.push(d, fb, gw);
+      return d;
+    }
+
+    function schedNote(freq, type, vol, t, dur, dest, detune = 0) {
+      const osc  = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type             = type;
+      osc.frequency.value  = freq;
+      osc.detune.value     = detune;
+      gain.gain.setValueAtTime(0.001, t);
+      gain.gain.linearRampToValueAtTime(vol, t + 0.01);
+      gain.gain.setValueAtTime(vol, t + dur * 0.55);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + dur);
+      osc.connect(gain); gain.connect(dest);
+      osc.start(t); osc.stop(t + dur + 0.02);
+      bgmNodes.push(osc, gain);
+    }
+
+    // ---- Drums ----
+    function schedKick(t, dest) {
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = 'sine';
+      o.frequency.setValueAtTime(200, t);
+      o.frequency.exponentialRampToValueAtTime(35, t + 0.14);
+      g.gain.setValueAtTime(1.4, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.22);
+      o.connect(g); g.connect(dest);
+      o.start(t); o.stop(t + 0.3);
+      bgmNodes.push(o, g);
+    }
+
+    function schedSnare(t, dest) {
+      // noise body
+      const len = Math.floor(audioCtx.sampleRate * 0.2);
+      const buf = audioCtx.createBuffer(1, len, audioCtx.sampleRate);
+      const d   = buf.getChannelData(0);
+      for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+      const src = audioCtx.createBufferSource();
+      const bp  = audioCtx.createBiquadFilter();
+      const g   = audioCtx.createGain();
+      src.buffer = buf;
+      bp.type = 'bandpass'; bp.frequency.value = 2200; bp.Q.value = 0.7;
+      g.gain.setValueAtTime(0.55, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
+      src.connect(bp); bp.connect(g); g.connect(dest);
+      src.start(t); src.stop(t + 0.25);
+      bgmNodes.push(src, bp, g);
+      // tone layer
+      const o2 = audioCtx.createOscillator();
+      const g2 = audioCtx.createGain();
+      o2.type = 'sine'; o2.frequency.value = 190;
+      g2.gain.setValueAtTime(0.3, t);
+      g2.gain.exponentialRampToValueAtTime(0.001, t + 0.08);
+      o2.connect(g2); g2.connect(dest);
+      o2.start(t); o2.stop(t + 0.12);
+      bgmNodes.push(o2, g2);
+    }
+
+    function schedHat(t, dest, vol, open = false) {
+      const len = Math.floor(audioCtx.sampleRate * (open ? 0.14 : 0.045));
+      const buf = audioCtx.createBuffer(1, len, audioCtx.sampleRate);
+      const d   = buf.getChannelData(0);
+      for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+      const src = audioCtx.createBufferSource();
+      const hp  = audioCtx.createBiquadFilter();
+      const g   = audioCtx.createGain();
+      src.buffer = buf;
+      hp.type = 'highpass'; hp.frequency.value = 8000;
+      g.gain.setValueAtTime(vol, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + (open ? 0.14 : 0.04));
+      src.connect(hp); hp.connect(g); g.connect(dest);
+      src.start(t); src.stop(t + len / audioCtx.sampleRate + 0.01);
+      bgmNodes.push(src, hp, g);
+    }
+
+    // ---- Song patterns ----
+    // Bass: walking Dm pattern
+    const BASS = [
+      [S[0],  0,           BEAT*0.85],  // D2
+      [S[0],  BEAT*0.5,    BEAT*0.4 ],
+      [S[6],  BEAT*1,      BEAT*0.85],  // C3
+      [S[4],  BEAT*1.5,    BEAT*0.4 ],  // A2
+      [S[3],  BEAT*2,      BEAT*0.85],  // G2
+      [S[3],  BEAT*2.5,    BEAT*0.4 ],
+      [S[4],  BEAT*3,      BEAT*0.85],  // A2
+      [S[5],  BEAT*3.5,    BEAT*0.4 ],  // Bb2
+    ];
+
+    // Lead melody A (bars 0–1)
+    const LEAD_A = [
+      [S[14], 0,            BEAT*0.45], // D4
+      [S[16], BEAT*0.5,     BEAT*0.4 ], // F4
+      [S[17], BEAT*1,       BEAT*0.9 ], // G4
+      [S[18], BEAT*2,       BEAT*0.45], // A4
+      [S[16], BEAT*2.5,     BEAT*0.4 ], // F4
+      [S[14], BEAT*3,       BEAT*0.45], // D4
+      [S[13], BEAT*3.5,     BEAT*0.45], // C4
+    ];
+    // Lead melody B (bars 2–3) — goes higher, more tension
+    const LEAD_B = [
+      [S[19], 0,            BEAT*0.45], // Bb4
+      [S[18], BEAT*0.5,     BEAT*0.4 ], // A4
+      [S[17], BEAT*1,       BEAT*0.9 ], // G4
+      [S[16], BEAT*2,       BEAT*0.45], // F4
+      [S[14], BEAT*2.5,     BEAT*0.45], // D4
+      [S[11], BEAT*3,       BEAT*0.9 ], // Bb3
+      [S[14], BEAT*3.75,    BEAT*0.3 ], // D4
+    ];
+
+    // Arpeggio chord tones: Dm  C  Bb  A (one per bar, 16th-note arps)
+    const ARP_CHORDS = [
+      [S[7], S[10], S[14]],  // Dm  D3-G3-D4
+      [S[6], S[9],  S[13]],  // C   C3-F3-C4
+      [S[5], S[8],  S[12]],  // Bb  Bb2-E3-Bb3
+      [S[4], S[7],  S[11]],  // A   A2-D3-A3
+    ];
+
+    function schedArp(chordHz, startT, dest) {
+      const step = BEAT * 0.25; // 16th notes
+      for (let i = 0; i < 16; i++) {
+        const hz = chordHz[i % chordHz.length];
+        schedNote(hz, 'triangle', 0.07, startT + i * step, step * 0.8, dest);
+      }
+    }
+
+    // ---- Main loop scheduler ----
+    function scheduleBars(startT) {
+      if (!bgmPlaying) return;
+
+      const comp    = bgmMaster;
+      const bassOut = makeLPF(500, comp);
+      const leadOut = makeDelay(BEAT * 0.375, 0.28, comp); // dotted-8th delay
+      const leadGain= makeGainNode(1, leadOut);
+      const arpOut  = makeGainNode(0.6, comp);
+      const drumOut = makeGainNode(1, comp);
+
+      for (let bar = 0; bar < 4; bar++) {
+        const bt = startT + bar * BAR;
+
+        // --- Bass ---
+        for (const [hz, off, dur] of BASS) {
+          schedNote(hz, 'sawtooth', 0.32, bt + off, dur, bassOut);
+        }
+
+        // --- Lead melody ---
+        const lead = (bgmBarCount + bar) % 4 < 2 ? LEAD_A : LEAD_B;
+        for (const [hz, off, dur] of lead) {
+          // Two detuned square waves for that classic synthwave lead
+          schedNote(hz, 'square', 0.09, bt + off, dur, leadGain,  +7);
+          schedNote(hz, 'square', 0.09, bt + off, dur, leadGain, -7);
+        }
+
+        // --- Arpeggios ---
+        const chord = ARP_CHORDS[(bgmBarCount + bar) % ARP_CHORDS.length];
+        schedArp(chord, bt, arpOut);
+
+        // --- Drums ---
+        // Kick: beats 1 & 3 (+ extra on "and of 2" for drive)
+        schedKick(bt,                drumOut);
+        schedKick(bt + BEAT * 1.5,   drumOut);
+        schedKick(bt + BEAT * 2,     drumOut);
+        schedKick(bt + BEAT * 3,     drumOut);
+        // Snare: beats 2 & 4
+        schedSnare(bt + BEAT,        drumOut);
+        schedSnare(bt + BEAT * 3,    drumOut);
+        // Hi-hats: 8th notes, open on beats 2 & 4
+        for (let h = 0; h < 8; h++) {
+          const isOpen = (h === 2 || h === 6);
+          schedHat(bt + h * BEAT * 0.5, drumOut, isOpen ? 0.18 : 0.11, isOpen);
+        }
+      }
+
+      bgmBarCount += 4;
+
+      // Schedule next block 1 bar before this one ends
+      const nextStart = startT + BAR * 4;
+      const msLeft    = (nextStart - audioCtx.currentTime - BAR) * 1000;
+      bgmScheduleTimer = setTimeout(() => scheduleBars(nextStart), Math.max(50, msLeft));
+    }
+
+    function startBGM() {
+      if (bgmPlaying) return;
+      bgmPlaying   = true;
+      bgmBarCount  = 0;
+      bgmNodes     = [];
+      bgmMaster    = makeCompressor(audioCtx.destination);
+      scheduleBars(audioCtx.currentTime + 0.08);
+    }
+
+    function stopBGM() {
+      bgmPlaying = false;
+      if (bgmScheduleTimer) { clearTimeout(bgmScheduleTimer); bgmScheduleTimer = null; }
+      for (const n of bgmNodes) {
+        try { n.disconnect(); } catch (_) {}
+        try { if (n.stop) n.stop(audioCtx.currentTime + 0.05); } catch (_) {}
+      }
+      bgmNodes    = [];
+      bgmBarCount = 0;
+      bgmMaster   = null;
+    }
+
+    // ---- Click-to-start overlay ----
+    const startOverlay = document.getElementById('startOverlay');
+    startOverlay.addEventListener('click', () => {
+      audioCtx.resume().then(() => {
+        startOverlay.style.display = 'none';
+        startBGM();
+      });
+    }, { once: true });
+
+    // Fallback: also start on first keypress
+    document.addEventListener('keydown', () => {
+      if (audioCtx.state === 'suspended') audioCtx.resume().then(startBGM);
+      else startBGM();
+    }, { once: true });
+
+    // =========================================================
+    // CONSTANTS
+    // =========================================================
+    const BULLET_SPEED         = 18;
+    const BASE_SHOOT_COOLDOWN  = 120;   // ms — normal fire rate
+    const RAPID_SHOOT_COOLDOWN = 60;    // ms — rapid fire rate
+    const BASE_ENEMY_SPEED     = 1.5;
+    const BASE_SPAWN_INTERVAL  = 1200;  // ms
+    const PLAYER_SPEED         = 10;
+    const POWERUP_INTERVAL     = 20000; // ms — spawn every 20 s
+    const POWERUP_DURATION     = 5000;  // ms — rapid fire lasts 5 s
+    const POINTS_PER_LEVEL     = 100;   // points needed to level up
+    const BOSS_INTERVAL        = 30000; // ms — boss every 30 s
+    const BOSS_HP              = 5;
+    const BOSS_SIZE            = 70;    // half-side of boss square
+    const BOSS_SPEED           = 0.8;
+    const BOSS_POINTS          = 50;
+
+    // =========================================================
+    // STARS
+    // =========================================================
+    let stars = [];
+    function generateStars() {
+      stars = Array.from({ length: 150 }, () => ({
+        x: Math.random() * canvas.width,
+        y: Math.random() * canvas.height,
+        r: Math.random() * 1.5
+      }));
+    }
+
+    // =========================================================
+    // PLAYER
+    // =========================================================
+    const player = {
+      x: 0,   // set after first resize
+      y: 0,
+      width: 40,
+      height: 30
+    };
+
+    // =========================================================
+    // GAME STATE
+    // =========================================================
+    let score, lives, level, bullets, enemies, powerUps, particles, bosses;
+    let lastShotTime, lastSpawnTime, lastPowerUpSpawn, lastBossSpawn;
+    let rapidFireEnd, gameOver;
+
+    function initGame() {
+      score            = 0;
+      lives            = 50;
+      level            = 1;
+      bullets          = [];
+      enemies          = [];
+      powerUps         = [];
+      particles        = [];
+      bosses           = [];
+      lastShotTime     = 0;
+      lastSpawnTime    = 0;
+      lastPowerUpSpawn = 0;
+      lastBossSpawn    = 0;
+      rapidFireEnd     = 0;
+      gameOver         = false;
+      player.x         = canvas.width / 2;
+      player.y         = canvas.height - 60;
+    }
+
+    // Boot: size canvas first, then init
+    resizeCanvas();
+    initGame();
+
+    // Derived difficulty values based on current level
+    function enemySpeed()     { return BASE_ENEMY_SPEED  + (level - 1) * 0.4; }
+    function spawnInterval()  { return Math.max(400, BASE_SPAWN_INTERVAL - (level - 1) * 150); }
+
+    // =========================================================
+    // INPUT
+    // =========================================================
+    const keys = {};
+    document.addEventListener('keydown', (e) => {
+      keys[e.code] = true;
+      if (['Space','ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.code))
+        e.preventDefault();
+
+      if (e.code === 'Space' && !gameOver) {
+        const now = Date.now();
+        const cooldown = now < rapidFireEnd ? RAPID_SHOOT_COOLDOWN : BASE_SHOOT_COOLDOWN;
+        if (now - lastShotTime >= cooldown) {
+          lastShotTime = now;
+          // 3-bullet spread: center + left + right
+          const bx = player.x;
+          const by = player.y - player.height / 2;
+          bullets.push({ x: bx,      y: by, vx:  0   });
+          bullets.push({ x: bx - 12, y: by, vx: -1.5 });
+          bullets.push({ x: bx + 12, y: by, vx:  1.5 });
+          playShoot();
+        }
+      }
+
+      if (e.code === 'KeyR' && gameOver) {
+        stopBGM();
+        initGame();
+        startBGM();
+      }    });
+    document.addEventListener('keyup', (e) => { keys[e.code] = false; });
+
+    // =========================================================
+    // SPAWN HELPERS
+    // =========================================================
+    function spawnEnemy() {
+      const size = 30;
+      enemies.push({
+        x: size + Math.random() * (canvas.width - size * 2),
+        y: -size,
+        size
+      });
+    }
+
+    function spawnBoss() {
+      bosses.push({
+        x: BOSS_SIZE + Math.random() * (canvas.width - BOSS_SIZE * 2),
+        y: -BOSS_SIZE,
+        size: BOSS_SIZE,
+        hp: BOSS_HP,
+        flashTimer: 0   // frames to flash white on hit
+      });
+    }
+
+    // =========================================================
+    // PARTICLES
+    // =========================================================
+    const PARTICLE_COLORS = ['#ff6f00', '#ff8f00', '#ffa000', '#e53935', '#ff5722', '#ffcc02'];
+
+    function spawnParticles(x, y) {
+      const count = 18 + Math.floor(Math.random() * 10); // 18–27 dots
+      for (let i = 0; i < count; i++) {
+        const angle  = Math.random() * Math.PI * 2;
+        const speed  = 1.2 + Math.random() * 3.5;
+        particles.push({
+          x, y,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          r:  2 + Math.random() * 3,       // radius 2–5 px
+          alpha: 1,
+          decay: 0.022 + Math.random() * 0.02, // fade speed
+          color: PARTICLE_COLORS[Math.floor(Math.random() * PARTICLE_COLORS.length)]
+        });
+      }
+    }
+
+    function spawnPowerUp() {      const r = 12;
+      powerUps.push({
+        x: r + Math.random() * (canvas.width - r * 2),
+        y: -r,
+        r,
+        pulse: 0   // for glow animation
+      });
+    }
+
+    // =========================================================
+    // COLLISION
+    // =========================================================
+    // AABB: bullet point vs square enemy
+    function squareHit(e, b) {
+      const half = e.size / 2;
+      return b.x >= e.x - half && b.x <= e.x + half &&
+             b.y >= e.y - half && b.y <= e.y + half;
+    }
+
+    // Circle hit used for power-up catch
+    function circleHit(cx, cy, cr, bx, by) {
+      const dx = bx - cx, dy = by - cy;
+      return dx * dx + dy * dy < cr * cr;
+    }
+
+    // =========================================================
+    // DRAW
+    // =========================================================
+    function drawStars() {
+      ctx.fillStyle = '#ffffff';
+      for (const s of stars) {
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    function drawPlayer() {
+      const { x, y, width, height } = player;
+      const now = Date.now();
+      const isRapid = now < rapidFireEnd;
+
+      // Rapid-fire glow outline
+      if (isRapid) {
+        ctx.shadowColor = '#00ff88';
+        ctx.shadowBlur  = 18;
+      }
+
+      ctx.fillStyle = isRapid ? '#00e676' : '#4fc3f7';
+      ctx.beginPath();
+      ctx.moveTo(x, y - height / 2);
+      ctx.lineTo(x - width / 2, y + height / 2);
+      ctx.lineTo(x + width / 2, y + height / 2);
+      ctx.closePath();
+      ctx.fill();
+      ctx.shadowBlur = 0;
+
+      ctx.fillStyle = '#ff6f00';
+      ctx.beginPath();
+      ctx.ellipse(x, y + height / 2, width / 6, 6, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    function drawBullets() {
+      const now = Date.now();
+      ctx.fillStyle = now < rapidFireEnd ? '#00e676' : '#ffeb3b';
+      for (const b of bullets) {
+        ctx.beginPath();
+        ctx.roundRect(b.x - 2, b.y - 8, 4, 10, 2);
+        ctx.fill();
+      }
+    }
+
+    function drawEnemies() {
+      for (const e of enemies) {
+        const half = e.size / 2;
+        // Red square body
+        ctx.fillStyle = '#e53935';
+        ctx.fillRect(e.x - half, e.y - half, e.size, e.size);
+        // Lighter inner square detail
+        ctx.fillStyle = '#ef9a9a';
+        ctx.fillRect(e.x - half * 0.5, e.y - half * 0.5, e.size * 0.5, e.size * 0.5);
+        // Dark border
+        ctx.strokeStyle = '#b71c1c';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(e.x - half, e.y - half, e.size, e.size);
+      }
+    }
+
+    function drawBosses() {
+      for (const b of bosses) {
+        const half = b.size / 2;
+        const flashing = b.flashTimer > 0;
+
+        // Purple glow
+        ctx.shadowColor = '#ce93d8';
+        ctx.shadowBlur  = 20;
+
+        // Body — flash white on hit, otherwise deep purple
+        ctx.fillStyle = flashing ? '#ffffff' : '#7b1fa2';
+        ctx.fillRect(b.x - half, b.y - half, b.size * 2, b.size * 2);
+
+        // Inner pattern
+        ctx.fillStyle = flashing ? '#eeeeee' : '#ab47bc';
+        ctx.fillRect(b.x - half * 0.6, b.y - half * 0.6, b.size * 2 * 0.6, b.size * 2 * 0.6);
+
+        // Border
+        ctx.shadowBlur  = 0;
+        ctx.strokeStyle = '#4a0072';
+        ctx.lineWidth   = 3;
+        ctx.strokeRect(b.x - half, b.y - half, b.size * 2, b.size * 2);
+
+        // HP bar above boss
+        const barW  = b.size * 2;
+        const barH  = 8;
+        const barX  = b.x - half;
+        const barY  = b.y - half - 14;
+        ctx.fillStyle = '#4a0072';
+        ctx.fillRect(barX, barY, barW, barH);
+        ctx.fillStyle = '#ce93d8';
+        ctx.fillRect(barX, barY, barW * (b.hp / BOSS_HP), barH);
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(barX, barY, barW, barH);
+
+        // BOSS label
+        ctx.fillStyle   = '#ffffff';
+        ctx.font        = 'bold 11px Arial';
+        ctx.textAlign   = 'center';
+        ctx.fillText('BOSS', b.x + half, barY - 3);
+      }
+      ctx.shadowBlur = 0;
+    }
+
+    function drawPowerUps() {
+      for (const p of powerUps) {
+        p.pulse = (p.pulse + 0.08) % (Math.PI * 2);
+        const glow = 6 + Math.sin(p.pulse) * 4;
+        ctx.shadowColor = '#00ff88';
+        ctx.shadowBlur  = glow;
+        ctx.fillStyle   = '#00e676';
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.shadowBlur  = 0;
+        // lightning bolt icon
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 13px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText('⚡', p.x, p.y + 5);
+      }
+    }
+
+    function drawParticles() {
+      for (const p of particles) {
+        ctx.globalAlpha = p.alpha;
+        ctx.fillStyle   = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    function drawHUD() {
+      const now = Date.now();
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 18px Arial';
+      ctx.textAlign = 'left';
+      ctx.fillText('Score: ' + score, 14, 28);
+
+      ctx.textAlign = 'center';
+      ctx.fillText('Level ' + level, canvas.width / 2, 28);
+
+      ctx.textAlign = 'right';
+      ctx.fillText('♥ ' + lives, canvas.width - 14, 28);
+
+      // Rapid-fire timer bar
+      if (now < rapidFireEnd) {
+        const remaining = (rapidFireEnd - now) / POWERUP_DURATION;
+        ctx.fillStyle = 'rgba(0,230,118,0.25)';
+        ctx.fillRect(14, 38, (canvas.width - 28) * remaining, 6);
+        ctx.strokeStyle = '#00e676';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(14, 38, canvas.width - 28, 6);
+        ctx.fillStyle = '#00e676';
+        ctx.font = '13px Arial';
+        ctx.textAlign = 'left';
+        ctx.fillText('RAPID FIRE', 14, 60);
+      }
+    }
+
+    function drawGameOver() {
+      ctx.fillStyle = 'rgba(0,0,0,0.65)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.textAlign = 'center';
+
+      ctx.fillStyle = '#f44336';
+      ctx.font = 'bold 72px Arial';
+      ctx.fillText('GAME OVER', canvas.width / 2, canvas.height / 2 - 50);
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 28px Arial';
+      ctx.fillText('Final Score: ' + score, canvas.width / 2, canvas.height / 2 + 10);
+
+      ctx.font = 'bold 22px Arial';
+      ctx.fillText('Level Reached: ' + level, canvas.width / 2, canvas.height / 2 + 46);
+
+      ctx.fillStyle = '#aaaaaa';
+      ctx.font = '20px Arial';
+      ctx.fillText('Press R to Restart', canvas.width / 2, canvas.height / 2 + 86);
+    }
+
+    // =========================================================
+    // UPDATE
+    // =========================================================
+    function update(now) {
+      // --- Level progression ---
+      const newLevel = Math.floor(score / POINTS_PER_LEVEL) + 1;
+      if (newLevel > level) level = newLevel;
+
+      // --- Player movement ---
+      const halfW = player.width / 2;
+      if (keys['ArrowLeft'])  player.x = Math.max(halfW, player.x - PLAYER_SPEED);
+      if (keys['ArrowRight']) player.x = Math.min(canvas.width - halfW, player.x + PLAYER_SPEED);
+
+      // --- Spawn enemies ---
+      if (now - lastSpawnTime >= spawnInterval()) {
+        lastSpawnTime = now;
+        spawnEnemy();
+        // At higher levels spawn an extra enemy
+        if (level >= 3 && Math.random() < 0.4) spawnEnemy();
+      }
+
+      // --- Spawn power-up every 20 s ---
+      if (lastPowerUpSpawn === 0) lastPowerUpSpawn = now;
+      if (now - lastPowerUpSpawn >= POWERUP_INTERVAL) {
+        lastPowerUpSpawn = now;
+        spawnPowerUp();
+      }
+
+      // --- Spawn boss every 30 s ---
+      if (lastBossSpawn === 0) lastBossSpawn = now;
+      if (now - lastBossSpawn >= BOSS_INTERVAL) {
+        lastBossSpawn = now;
+        spawnBoss();
+      }
+
+      // --- Move bullets ---
+      for (const b of bullets) {
+        b.y -= BULLET_SPEED;
+        b.x += (b.vx || 0);
+      }
+
+      // --- Move enemies ---
+      for (const e of enemies) e.y += enemySpeed();
+
+      // --- Move bosses & tick flash ---
+      for (const b of bosses) {
+        b.y += BOSS_SPEED;
+        if (b.flashTimer > 0) b.flashTimer--;
+      }
+
+      // --- Move power-ups ---
+      for (const p of powerUps) p.y += 1.8;
+
+      // --- Bullet vs enemy ---
+      for (let bi = bullets.length - 1; bi >= 0; bi--) {
+        let hit = false;
+        for (let ei = enemies.length - 1; ei >= 0; ei--) {
+          if (squareHit(enemies[ei], bullets[bi])) {
+            spawnParticles(enemies[ei].x, enemies[ei].y);
+            enemies.splice(ei, 1);
+            bullets.splice(bi, 1);
+            score += 10;
+            playExplosion();
+            hit = true;
+            break;
+          }
+        }
+        if (hit) continue;
+
+        // --- Bullet vs boss ---
+        for (let bsi = bosses.length - 1; bsi >= 0; bsi--) {
+          const boss = bosses[bsi];
+          const half = boss.size / 2;
+          const bul  = bullets[bi];
+          // Boss occupies (x-half, y-half) to (x+half, y+half) — full square is size*2
+          if (bul.x >= boss.x - half && bul.x <= boss.x + half &&
+              bul.y >= boss.y - half && bul.y <= boss.y + half) {
+            bullets.splice(bi, 1);
+            boss.hp--;
+            boss.flashTimer = 6;
+            playExplosion();
+            if (boss.hp <= 0) {
+              spawnParticles(boss.x + half, boss.y + half);
+              spawnParticles(boss.x - half, boss.y - half);
+              spawnParticles(boss.x + half, boss.y - half);
+              bosses.splice(bsi, 1);
+              score += BOSS_POINTS;
+              playBossExplosion();
+            }
+            hit = true;
+            break;
+          }
+        }
+      }
+
+      // --- Player catches power-up ---
+      for (let i = powerUps.length - 1; i >= 0; i--) {
+        const p = powerUps[i];
+        if (circleHit(p.x, p.y, p.r + player.width / 2,
+                      player.x, player.y)) {
+          powerUps.splice(i, 1);
+          rapidFireEnd = Date.now() + POWERUP_DURATION;
+          playPowerUp();
+        }
+      }
+
+      // --- Update & cull particles ---
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.x     += p.vx;
+        p.y     += p.vy;
+        p.vy    += 0.07;          // slight gravity pull
+        p.alpha -= p.decay;
+        if (p.alpha <= 0) particles.splice(i, 1);
+      }
+
+      // --- Remove off-screen bullets ---
+      for (let i = bullets.length - 1; i >= 0; i--) {
+        if (bullets[i].y + 10 < 0) bullets.splice(i, 1);
+      }
+
+      // --- Remove off-screen power-ups ---
+      for (let i = powerUps.length - 1; i >= 0; i--) {
+        if (powerUps[i].y - powerUps[i].r > canvas.height) powerUps.splice(i, 1);
+      }
+
+      // --- Enemy reaches bottom ---
+      for (let i = enemies.length - 1; i >= 0; i--) {
+        if (enemies[i].y - enemies[i].size / 2 > canvas.height) {
+          enemies.splice(i, 1);
+          lives--;
+          if (lives <= 0) { lives = 0; gameOver = true; stopBGM(); }
+        }
+      }
+
+      // --- Boss reaches bottom ---
+      for (let i = bosses.length - 1; i >= 0; i--) {
+        if (bosses[i].y - bosses[i].size / 2 > canvas.height) {
+          bosses.splice(i, 1);
+          lives = Math.max(0, lives - 2); // boss costs 2 lives if it slips through
+          if (lives <= 0) { gameOver = true; stopBGM(); }
+        }
+      }
+    }
+
+    // =========================================================
+    // DRAW FRAME
+    // =========================================================
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      drawStars();
+      drawPowerUps();
+      drawParticles();
+      drawPlayer();
+      drawBullets();
+      drawBosses();
+      drawEnemies();
+      drawHUD();
+      if (gameOver) drawGameOver();
+    }
+
+    // =========================================================
+    // GAME LOOP
+    // =========================================================
+    function loop(now) {
+      if (!gameOver) update(now);
+      draw();
+      requestAnimationFrame(loop);
+    }
+
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
